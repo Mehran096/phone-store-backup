@@ -1,0 +1,39 @@
+{
+   "name": "phone-store-api",
+   "version": "1.0.0",
+   "description": "",
+   "main": "index.js",
+   "scripts": {
+      "start": "node index.js",
+      "dev": "nodemon index.js",
+      "data:import": "node seeder.js",
+      "data:destroy": "node seeder.js -d"
+   },
+   "keywords": [],
+   "author": "",
+   "license": "ISC",
+   "type": "commonjs",
+   "dependencies": {
+      "axios": "^1.18.0",
+      "bcryptjs": "^3.0.3",
+      "cloudinary": "^1.41.3",
+      "compression": "^1.8.1",
+      "cookie-parser": "^1.4.7",
+      "cors": "^2.8.6",
+      "dotenv": "^17.4.2",
+      "express": "^5.2.1",
+      "express-async-handler": "^1.2.0",
+      "jsonwebtoken": "^9.0.3",
+      "mongoose": "^9.6.1",
+      "multer": "^2.1.1",
+      "multer-storage-cloudinary": "^4.0.0",
+      "nodemailer": "^8.0.10",
+      "react-router-dom": "^7.15.0",
+      "resend": "^6.12.4",
+      "slugify": "^1.6.9",
+      "stripe": "^22.1.1"
+   },
+   "devDependencies": {
+      "nodemon": "^3.1.14"
+   }
+}

@@ -1,0 +1,399 @@
+const express = require('express');
+const dotenv = require('dotenv');
+dotenv.config();
+const cors = require('cors');
+const connectDB = require('./config/db'); // we’ll make this
+const { notFound, errorHandler } = require('./middleware/errorMiddleware');
+const cookieParser = require('cookie-parser');
+//const jazzcashRoutes = require('./routes/jazzcashRoutes.js');
+const multer = require('multer') 
+const compression = require('compression')
+const userRoutes = require('./routes/userRoutes');
+const productRoutes = require('./routes/productRoutes');
+const { cloudinary } = require('./utils/cloudinary') 
+const orderRoutes = require('./routes/orderRoutes'); 
+const contactRoutes = require('./routes/contactRoutes.js');
+const uploadRoutes = require('./routes/uploadRoutes.js');
+const sitemapRoutes = require('./routes/sitemapRoutes.js' )
+const accessoryRoutes = require('./routes/accessoryRoutes.js');
+const wishlistRoutes = require('./routes/wishlistRoutes')
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+  const Order = require('./models/orderModel.js');
+  const User = require('./models/User');
+  const Product = require('./models/Product')
+  const Accessory = require('./models/Accessory');
+  const adminRoutes = require('./routes/adminRoutes')
+  const sendEmail = require( './utils/sendEmail.js')
+connectDB(); // Connect to MongoDB Atlas
+
+const app = express();
+ 
+// console.log('Using url:', process.env.FRONTEND_URL)
+// console.log('SMTP_HOST:', process.env.SMTP_HOST)
+// 1. Put webhook route BEFORE express.json()
+//app.use('/api/orders/webhook', express.raw({type: 'application/json'}), orderRoutes)
+app.post('/api/orders/webhook', express.raw({type: 'application/json'}), async (req, res) => {
+  const sig = req.headers['stripe-signature']
+  let event
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
+  } catch (err) {
+    console.log('Webhook signature verification failed:', err.message)
+    return res.status(400).send(`Webhook Error: ${err.message}`)
+  }
+
+  // 1. PAYMENT SUCCESS
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object
+    const orderId = session.metadata.orderId
+    
+    console.log('Webhook orderId from metadata:', orderId)
+
+    try {
+      // Update ONLY payment fields. Don't touch prices - trust your DB
+      const order = await Order.findOneAndUpdate(
+        { _id: orderId, isPaid: false }, 
+        {
+          isPaid: true,
+          paidAt: Date.now(),
+          paymentResult: {
+            id: session.payment_intent, // Use payment_intent, not session.id
+            status: session.payment_status,
+            update_time: new Date().toISOString(),
+            email_address: session.customer_email,
+          },
+        }, 
+        { new: true }
+      ).populate('user', 'name email')
+
+      // If order is null, webhook already ran or order doesn't exist
+      if (!order) {
+        console.log('Duplicate webhook blocked or order not found:', orderId)
+        return res.json({ received: true })
+      }
+
+      console.log('paymentResult Order updated:', order.paymentResult)
+
+      // === NEW: INCREMENT allSales FOR PRODUCTS AND ACCESSORIES ===
+      for(const item of order.orderItems){
+        if(item.product){
+          await Product.updateOne(
+            { _id: item.product },
+            { $inc: { allSales: item.qty } }
+          )
+        }
+        if(item.accessory){
+          await Accessory.updateOne(
+            { _id: item.accessory },
+            { $inc: { allSales: item.qty } }
+          )
+        }
+      }
+      console.log('Sales incremented for order:', order._id)
+
+      // === NEW: TRACK FREQUENTLY BOUGHT TOGETHER ===
+      const productsInOrder = order.orderItems.filter(i => i.product).map(i => i.product)
+      const accessoriesInOrder = order.orderItems.filter(i => i.accessory).map(i => i.accessory)
+
+      // For each product, increment count for each accessory bought with it
+      for (const productId of productsInOrder) {
+        for (const accessoryId of accessoriesInOrder) {
+          // Try to increment existing
+          const updated = await Product.updateOne(
+            { _id: productId, "frequentlyBoughtWith.accessory": accessoryId },
+            { $inc: { "frequentlyBoughtWith.$.count": 1 } }
+          )
+
+          // If not found, push new
+          if (updated.modifiedCount === 0) {
+            await Product.updateOne(
+              { _id: productId },
+              { $push: { frequentlyBoughtWith: { accessory: accessoryId, count: 1 } } }
+            )
+          }
+        }
+      }
+      console.log('Frequently bought together data updated')
+
+      // Clear user's cart
+      await User.findByIdAndUpdate(order.user._id, { cartItems: [] })
+
+      if (order.user?.email) {
+        console.log('Order found. User email:', order.user.email)
+        try {
+          await sendEmail({
+            email: order.user.email,
+            subject: `Payment Confirmed - Order #${order._id.toString().slice(-6)}`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+                <h2>Payment Received, ${order.user.name}</h2>
+                <p>Your payment of <strong>${order.currency} ${order.itemsPrice}</strong> for Order #${order._id.toString().slice(-6)} was successful.</p>
+                <h3>What's Next?</h3>
+                <p>We're now preparing your items for shipment. You'll receive another email when it ships.</p>
+                <a href="${process.env.FRONTEND_URL}/order/${order._id}"
+                   style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;margin-top:16px">
+                   Track Your Order
+                </a>
+              </div>
+            `,
+          })
+          console.log('Payment confirmation email sent:', order.user.email)
+        } catch (emailError) {
+          console.log('Payment email failed:', emailError.message)
+        }
+      }
+    } catch (dbError) {
+      console.log('DB update failed in webhook:', dbError.message)
+      return res.status(500).send('DB Error') // Tell Stripe to retry
+    }
+  }
+  
+  // 2. PAYMENT UPDATE or failed - Safe for Live + Local
+else if (event.type === 'checkout.session.async_payment_failed' || event.type === 'payment_intent.payment_failed') {
+  const session = event.data.object
+  const orderId = session.metadata?.orderId
+  
+  console.log('Payment update for orderId:', orderId)
+  
+  if (orderId) {
+    const order = await Order.findById(orderId).populate('user', 'name email')
+    
+    if (order && order.user?.email) {
+      
+      const emailData = {
+        email: order.user.email,
+        subject: `Update on Order #${order._id.toString().slice(-6)}`,
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827;line-height:1.6">
+            <h2 style="color:#111827;font-size:20px;margin:0 0 16px">Hi ${order.user.name},</h2>
+            <p>We weren't able to complete the payment for your order #${order._id.toString().slice(-6)}.</p>
+            <p>Sometimes banks decline a charge. You can easily retry your payment using the button below.</p>
+            
+            <a href="${process.env.FRONTEND_URL}/order/${order._id}"
+               style="display:inline-block;background:#2563eb;color:#ffffff;padding:12px 24px;text-decoration:none;border-radius:6px;margin:16px 0;font-weight:600">
+               Complete Your Order
+            </a>
+            
+            <p style="font-size:13px;color:#6b7280;margin-top:24px">
+              Need help? Just reply to this email and our team will assist you.
+            </p>
+            <p style="font-size:12px;color:#9ca3af">- Team PhoneStore</p>
+          </div>
+        `,
+      }
+
+      // RULE: Local me sirf log, Live me asal email
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('========== EMAIL PREVIEW - NOT SENT ==========')
+        console.log('To:', emailData.email)
+        console.log('Subject:', emailData.subject)
+        console.log('==============================================')
+      } else {
+        try {
+          await sendEmail(emailData)
+          console.log('Payment update email sent:', order.user.email)
+        } catch (emailError) {
+          console.log('Payment update email error:', emailError.message)
+        }
+      }
+    }
+  }
+}
+  
+  // 3. REFUND PROCESSED
+  else if (event.type === 'charge.refunded') {
+    const charge = event.data.object
+    const paymentIntentId = charge.payment_intent
+    
+    console.log('Refund for payment_intent:', paymentIntentId)
+    
+    // Only find orders that were actually paid
+    const order = await Order.findOne({ 
+      'paymentResult.id': paymentIntentId,
+      isPaid: true 
+    }).populate('user', 'name email')
+    
+    if (order) {
+      // Check if already refunded to prevent duplicate emails
+      if (order.isRefunded) {
+        console.log('Refund webhook duplicate blocked for:', order._id)
+        return res.json({ received: true })
+      }
+
+// === NEW: DECREMENT allSales FOR PRODUCTS AND ACCESSORIES ===
+      for(const item of order.orderItems){
+        if(item.product){
+          await Product.updateOne(
+            { _id: item.product },
+            { $inc: { allSales: -item.qty } }
+          )
+        }
+        if(item.accessory){
+          await Accessory.updateOne(
+            { _id: item.accessory },
+            { $inc: { allSales: -item.qty } }
+          )
+        }
+      }
+
+      //Safety: reset any negatives to 0
+      await Accessory.updateMany({ allSales: { $lt: 0 } }, { $set: { allSales: 0 } })
+      await Product.updateMany({ allSales: { $lt: 0 } }, { $set: { allSales: 0 } })
+
+      // === NEW: DECREMENT FREQUENTLY BOUGHT TOGETHER ===
+      const productsInOrder = order.orderItems.filter(i => i.product).map(i => i.product)
+      const accessoriesInOrder = order.orderItems.filter(i => i.accessory).map(i => i.accessory)
+
+      for (const productId of productsInOrder) {
+        for (const accessoryId of accessoriesInOrder) {
+          await Product.updateOne(
+            { _id: productId, "frequentlyBoughtWith.accessory": accessoryId },
+            { $inc: { "frequentlyBoughtWith.$.count": -1 } }
+          )
+        }
+      }
+
+      // Safety: remove any with count <= 0
+      await Product.updateMany(
+        {},
+        { $pull: { frequentlyBoughtWith: { count: { $lte: 0 } } } }
+      )
+      
+      order.isRefunded = true
+      order.refundedAt = Date.now()
+      order.refundAmount = charge.amount_refunded / 100 // Store refund amount
+      await order.save()
+      
+      if (order.user?.email) {
+  try {
+    await sendEmail({
+      email: order.user.email,
+      subject: `Refund Processed - Order #${order._id.toString().slice(-6)}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+          <h2>Refund Processed</h2>
+          <p>Hi ${order.user.name}, your refund of <strong>${(charge.amount_refunded / 100).toFixed(2)}</strong> has been processed.</p>
+          <p>It may take 5-10 business days to appear on your statement.</p>
+          <p><strong>Order ID:</strong> ${order._id}</p>
+        </div>
+      `
+    })
+    console.log('Refund email sent:', order.user.email)
+  } catch (emailError) {
+    console.log('Refund email error:', emailError.message)
+  }
+}
+    } else {
+      console.log('Order not found for refunded payment_intent:', paymentIntentId)
+    }
+  }
+
+  // Always respond 200 to Stripe at the end
+  res.status(200).send('ok')
+})
+
+// Middleware
+app.use(cors({
+  origin: ['https://phone-store.asia', 'https://www.phone-store.asia', 'https://phone-shop-front-end-woad.vercel.app', 'http://localhost:5173'],
+   credentials: true  
+}));
+
+app.use(express.json()); // Body parser
+app.use(express.urlencoded({ extended: true }))
+//app.use('/api/jazzcash', jazzcashRoutes)
+
+// Routes
+app.get('/', (req, res) => {
+  res.send('Phone Store API is running...');
+});
+
+// Add this robots.txt route HERE
+// app.get('/robots.txt', (req, res) => {
+//   res.type('text/plain');
+//   res.send(`User-agent: *
+// Allow: /
+
+// Disallow: /cart
+// Disallow: /checkout
+// Disallow: /payment
+// Disallow: /login
+// Disallow: /register
+// Disallow: /profile
+// Disallow: /orders
+// Disallow: /admin 
+// Disallow: /*?sort=
+// Disallow: /*?price=
+
+// Sitemap: https://phone-store.asia/api/sitemap.xml
+// `);
+// });
+
+app.use(cookieParser());
+app.use(compression())
+app.use('/api/users', userRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/accessories', accessoryRoutes);
+app.use('/api/wishlist', wishlistRoutes);
+
+app.use('/api/orders', orderRoutes);
+app.use('/api/contact', contactRoutes)
+app.use('/api/admin', adminRoutes)
+app.use('/api/upload', uploadRoutes);
+app.use('/', sitemapRoutes)
+app.use(express.static('public', { maxAge: '1y' }))
+
+// Error handling middleware - must be last
+app.use(notFound);
+app.use(errorHandler);
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    console.error('MULTER ERROR:', err)
+    return res.status(400).json({ message: err.message })
+  }
+  next(err)
+})
+
+//multer error
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  
+  console.error('UPLOAD ERROR:', err)
+  if (err) {
+    return res.status(400).json({ message: err.message })
+  }
+  next(err)
+})
+
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err); // skip if response already sent
+  }
+  
+  console.error('ERROR STACK:', err.stack)
+  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  res.status(statusCode).json({ message: err.message })
+})
+// Catch multer + cloudinary errors
+// app.use((err, req, res, next) => {
+//   console.error('UPLOAD ERROR:', err)
+//   if (err) {
+//     return res.status(400).json({ message: err.message })
+//   }
+//   next(err)
+// })
+// app.use((err, req, res, next) => {
+//   console.error('ERROR STACK:', err.stack)  // <-- this line is critical
+//   res.status(500).json({ message: err.message })
+// })
+
+ 
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
