@@ -26,6 +26,9 @@
 ### Product Catalog & Detail Page
 ![Product Page](./screenshots/product-page.png)
 
+### Product Review Page
+![Product Review Page](./screenshots/product-review.png)
+
 ### Wishlist Cart
 ![Wishlist page](./screenshots/wishlist.png)
 
