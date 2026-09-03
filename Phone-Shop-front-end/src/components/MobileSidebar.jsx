@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { FaChevronDown, FaBox, FaUser, FaTimes, FaFire, FaStar, FaClock } from 'react-icons/fa'
 import { IoLogOutOutline } from "react-icons/io5"
 import { useSelector, useDispatch } from 'react-redux'
@@ -11,11 +11,13 @@ import api from '../utils/axios'
 const MobileSidebar = ({ show, setShow }) => {
   const dispatch = useDispatch()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const [openAccessory, setOpenAccessory] = useState(false)
   const [openCategory, setOpenCategory] = useState(true)
   const [openType, setOpenType] = useState(false)
   const [openExplore, setOpenExplore] = useState(false)
+  const currentFilter = searchParams.get('filter') // 'latest'
 
   const { userInfo } = useSelector((state) => state.auth)
 
@@ -143,10 +145,10 @@ const MobileSidebar = ({ show, setShow }) => {
 
   {/* LATEST PHONES - NEW BUTTON */}
   <button 
-  onClick={() => { navigate('/products'); closeSidebar() }}
+  onClick={() => { navigate('/products?filter=latest'); closeSidebar() }}
      
     className={`flex items-center gap-2 w-full text-left py-2.5 text-[16px] transition
-      ${location.pathname === '/products' 
+      ${location.pathname === '/products' && currentFilter === 'latest'
         ? 'text-blue-400 font-semibold'
         : 'text-white hover:text-blue-400'}`}
   >

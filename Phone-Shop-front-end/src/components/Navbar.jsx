@@ -18,6 +18,7 @@ const Navbar = () => {
     const timeoutRef = useRef(null)
     const hoverTimeoutRef = useRef(null)
     const scrollRef = useRef(null)
+    const currentFilter = searchParams.get('filter') //latest phones
 
 const scroll = (direction) => {
   if (scrollRef.current) {
@@ -365,9 +366,9 @@ const scroll = (direction) => {
 
   {/* LATEST PHONES - NEW BUTTON */}
   <button 
-    onClick={() => navigate('/products')}
+    onClick={() => navigate('/products?filter=latest')}
     className={`text-sm px-2 py-1.5 rounded-md transition-all duration-200 font-semibold
-      ${location.pathname === '/products' 
+      ${location.pathname === '/products' && currentFilter === 'latest' 
         ? 'bg-indigo-600 text-white' 
         : 'text-indigo-400 hover:text-white hover:bg-indigo-600/30'}`}
   >
